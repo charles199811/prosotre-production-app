@@ -3,8 +3,13 @@ import { PrismaAdapter } from "@auth/prisma-adapter";
 import { prisma } from "@/db/prisma";
 import CredentialsProvider from "next-auth/providers/credentials";
 import { compareSync } from "bcrypt-ts-edge";
-import { cookies } from "next/headers";
-import { authConfig } from "./auth.config";
+// import { cookies } from "next/headers";
+// import { authConfig } from "./auth.config";
+import { UserRole } from "@prisma/client";
+
+const ALLOWED_DOMAIN = process.env.ALLOWED_EMAIL_DOMAIN ?? "intelura.com";
+
+const ALLOWED_ROLES = new Set<UserRole>([UserRole.ADMIN, UserRole.ANALYST]);
 
 export const config = {
   pages: {
@@ -23,7 +28,7 @@ export const config = {
         password: { type: "password" },
       },
       async authorize(credentials) {
-        if (credentials == null) return null;
+        if (!credentials?.email || !credentials?.password) return null;
 
         //Find user in database
         const user = await prisma.user.findFirst({
@@ -36,7 +41,7 @@ export const config = {
         if (user && user.password) {
           const isMatch = compareSync(
             credentials.password as string,
-            user.password
+            user.password,
           );
 
           //If password is correct, return to user
@@ -55,6 +60,34 @@ export const config = {
     }),
   ],
   callbacks: {
+    //Gate access here
+    async signIn({ user }: any) {
+      const email = (user?.email ?? "").toLowerCase();
+      const role = user?.role as UserRole | undefined;
+
+      const hasAllowedDomain = email.endsWith(`@${ALLOWED_DOMAIN}`);
+      const hasAllowedRole = role ? ALLOWED_ROLES.has(role) : false;
+
+      // allow if either condition is true
+      return hasAllowedDomain || hasAllowedRole;
+    },
+
+    //Persist role/name into JWT
+    async jwt({ token, user, trigger, session }: any) {
+      if (user) {
+        token.role = user.role;
+        token.name = user.name;
+      }
+
+      // optional: if you ever update the session name, keep token in sync
+      if (trigger === "update" && session?.user?.name) {
+        token.name = session.user.name;
+      }
+
+      return token;
+    },
+
+    //Expose token fields into session
     async session({ session, user, trigger, token }: any) {
       //set user id from token
       session.user.id = token.sub;
@@ -68,55 +101,6 @@ export const config = {
 
       return session;
     },
-    async jwt({ token, user, trigger, session }: any) {
-      //asign user field to token
-      if (user) {
-        token.role = user.role;
-
-        //If user has no name then use the email
-        if (user.name === "NO_NAME") {
-          token.name = user.email!.split("@")[0];
-
-          //Update database to reflect the tokec name
-          await prisma.user.update({
-            where: { id: user.id },
-            data: { name: token.name },
-          });
-        }
-
-        if (trigger === "signIn" || trigger === "signUp") {
-          const cookiesObject = await cookies();
-          const sessionCartId = cookiesObject.get("sessionCartId")?.value;
-
-          if (sessionCartId) {
-            const sessionCart = await prisma.cart.findFirst({
-              where: { sessionCartId },
-            });
-
-            if (sessionCart) {
-              //Delete current cart
-              await prisma.cart.deleteMany({
-                where: { userId: user.id },
-              });
-              //Asign new cart
-              await prisma.cart.update({
-                where: { id: sessionCart.id },
-                data: { userId: user.id },
-              });
-            }
-          }
-        }
-      }
-
-      //Handle session updates
-      if (session?.user.name && trigger === "update") {
-        token.name = session.user.name;
-      }
-
-      return token;
-    },
-
-    ...authConfig.callbacks,
   },
 };
 
